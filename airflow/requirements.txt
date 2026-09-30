@@ -1,0 +1,11 @@
+# pyspark is pinned to EXACTLY match the Spark cluster version
+# (bitnamilegacy/spark:3.5.1 in docker-compose.yml). Without this pin,
+# pip resolves apache-airflow-providers-apache-spark's pyspark dependency
+# to the newest release, and a driver on a newer major Spark version
+# cannot talk to an older-version standalone master -- Spark's internal
+# RPC classes aren't wire-compatible across major versions, which surfaces
+# as "java.io.InvalidClassException: ... local class incompatible" deep
+# in a Netty stack trace rather than a clear version-mismatch error.
+pyspark==3.5.1
+apache-airflow-providers-apache-spark==4.11.0
+psycopg2-binary==2.9.9

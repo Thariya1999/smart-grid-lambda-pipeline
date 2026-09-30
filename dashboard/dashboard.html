@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Smart Grid Monitoring &amp; Billing</title>
+<style>
+  :root{
+    --bg:#0b1220; --panel:#121b2e; --panel2:#0f1830; --text:#e6ebf5; --muted:#8ea0c2;
+    --accent:#3fd18f; --accent2:#4f8bff; --warn:#f5a623; --danger:#ef5a5a; --border:#22304f;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f4f6fb; --panel:#ffffff; --panel2:#eef1f8; --text:#152238; --muted:#5b6b8c; --border:#dbe2f0; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);}
+  header{padding:20px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+  header h1{font-size:18px;margin:0;font-weight:600}
+  header .sub{color:var(--muted);font-size:13px}
+  .status-pill{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;font-size:13px;font-weight:600;border:1px solid var(--border)}
+  .dot{width:8px;height:8px;border-radius:50%}
+  .dot.ok{background:var(--accent)} .dot.bad{background:var(--danger)} .dot.warn{background:var(--warn)}
+  main{padding:24px;max-width:1200px;margin:0 auto}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-bottom:24px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:0 0 10px}
+  .zone-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)}
+  .zone-row:last-child{border-bottom:none}
+  .zone-name{font-weight:600}
+  .bar{height:6px;border-radius:4px;background:var(--panel2);overflow:hidden;margin-top:4px;width:140px}
+  .bar-fill{height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent))}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.03em}
+  .alert-row{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);align-items:flex-start}
+  .sev{padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;white-space:nowrap}
+  .sev.WARNING{background:rgba(245,166,35,.15);color:var(--warn)}
+  .sev.CRITICAL{background:rgba(239,90,90,.15);color:var(--danger)}
+  .empty{color:var(--muted);font-size:13px;padding:8px 0}
+  footer{padding:16px 24px;color:var(--muted);font-size:12px;text-align:center}
+  select,input{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 10px;font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>⚡ Smart Grid Energy Monitoring &amp; Billing</h1>
+    <div class="sub">Use Case 3 — Lambda architecture live dashboard</div>
+  </div>
+  <div id="statusPill" class="status-pill"><span class="dot warn"></span><span>Connecting…</span></div>
+</header>
+<main>
+  <div class="grid">
+    <div class="card">
+      <h2>Live grid load &amp; renewable mix by zone</h2>
+      <div id="zoneList"><div class="empty">Waiting for data…</div></div>
+    </div>
+    <div class="card">
+      <h2>Active alerts</h2>
+      <div id="alertList"><div class="empty">No alerts</div></div>
+    </div>
+    <div class="card">
+      <h2>Pipeline health</h2>
+      <table>
+        <tr><td>Streaming data freshness</td><td id="freshness">—</td></tr>
+        <tr><td>Last successful batch run</td><td id="lastBatch">—</td></tr>
+        <tr><td>DB connection</td><td id="dbConn">—</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Household bills — <span id="billDateLabel">latest simulated day</span></h2>
+    <div style="overflow-x:auto">
+    <table id="billTable">
+      <thead>
+        <tr><th>Household</th><th>Zone</th><th>Consumption (kWh)</th><th>Solar (kWh)</th>
+            <th>Net (kWh)</th><th>Tariff</th><th>Subsidy</th><th>Final Amount (LKR)</th></tr>
+      </thead>
+      <tbody><tr><td colspan="8" class="empty">No bills yet — waiting for first simulated day to complete.</td></tr></tbody>
+    </table>
+    </div>
+  </div>
+</main>
+<footer>Auto-refreshes every 5s · API base: <span id="apiBase"></span></footer>
+
+<script>
+const API_BASE = window.location.origin;
+document.getElementById('apiBase').textContent = API_BASE;
+
+async function safeFetch(path){
+  try{
+    const r = await fetch(API_BASE + path);
+    if(!r.ok) return null;
+    return await r.json();
+  }catch(e){ return null; }
+}
+
+function fmt(n, d=2){ return (typeof n === 'number') ? n.toFixed(d) : '—'; }
+
+async function refresh(){
+  const health = await safeFetch('/health');
+  const pill = document.getElementById('statusPill');
+  if(health){
+    const ok = health.status === 'healthy';
+    pill.innerHTML = `<span class="dot ${ok?'ok':'bad'}"></span><span>${ok?'Pipeline healthy':'Pipeline degraded'}</span>`;
+    document.getElementById('freshness').textContent = health.kafka_last_message_age_s != null
+      ? fmt(health.kafka_last_message_age_s,0) + 's ago' : 'no data yet';
+    document.getElementById('lastBatch').textContent = health.last_batch_run || '—';
+    document.getElementById('dbConn').textContent = health.db_connected ? 'connected' : 'disconnected';
+  } else {
+    pill.innerHTML = `<span class="dot bad"></span><span>API unreachable</span>`;
+  }
+
+  const zones = await safeFetch('/zones/live');
+  const zoneList = document.getElementById('zoneList');
+  if(zones && zones.zones && zones.zones.length){
+    zoneList.innerHTML = zones.zones.map(z => {
+      const pct = Math.round((z.renewable_share||0)*100);
+      return `<div class="zone-row">
+        <div><div class="zone-name">${z.grid_zone}</div>
+             <div style="color:var(--muted);font-size:12px">${fmt(z.total_consumption_kwh)} kWh load</div></div>
+        <div style="text-align:right">
+          <div>${pct}% solar</div>
+          <div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>
+        </div>
+      </div>`;
+    }).join('');
+  } else {
+    zoneList.innerHTML = '<div class="empty">Waiting for streaming data…</div>';
+  }
+
+  const alerts = await safeFetch('/alerts?limit=10&unacknowledged_only=true');
+  const alertList = document.getElementById('alertList');
+  if(alerts && alerts.alerts && alerts.alerts.length){
+    alertList.innerHTML = alerts.alerts.map(a => `
+      <div class="alert-row">
+        <span class="sev ${a.severity}">${a.severity}</span>
+        <div>
+          <div>${a.message}</div>
+          <div style="color:var(--muted);font-size:11px">${new Date(a.created_at).toLocaleTimeString()}</div>
+        </div>
+      </div>`).join('');
+  } else {
+    alertList.innerHTML = '<div class="empty">No active alerts</div>';
+  }
+
+  const bills = await safeFetch('/bills');
+  const tbody = document.querySelector('#billTable tbody');
+  if(bills && bills.bills && bills.bills.length){
+    document.getElementById('billDateLabel').textContent = bills.bills[0].sim_date;
+    tbody.innerHTML = bills.bills.map(b => `
+      <tr>
+        <td>${b.household_id}</td><td>${b.grid_zone}</td>
+        <td>${fmt(b.total_consumption_kwh)}</td><td>${fmt(b.total_solar_kwh)}</td>
+        <td>${fmt(b.net_consumption_kwh)}</td><td>${fmt(b.tariff_rate)}</td>
+        <td>${b.subsidy_flag ? 'Yes' : 'No'}</td><td><strong>${fmt(b.final_amount)}</strong></td>
+      </tr>`).join('');
+  }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
