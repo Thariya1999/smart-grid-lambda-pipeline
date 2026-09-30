@@ -27,7 +27,10 @@ from sources.common import (  # noqa: E402
     HOUSEHOLDS,
     KAFKA_BOOTSTRAP_SERVERS,
     METER_TOPIC,
+    SIM_CLOCK_FILE,
+    current_sim_date,
     get_logger,
+    get_sim_epoch,
     log_event,
 )
 from sources.simulation_logic import generate_meter_reading  # noqa: E402
@@ -62,6 +65,9 @@ def run(dry_run: bool, count: int | None) -> None:
                     log_event(logger, "error", "kafka_unreachable_giving_up")
                     raise
 
+    sim_epoch = get_sim_epoch(None if dry_run else SIM_CLOCK_FILE)
+    log_event(logger, "info", "sim_clock_loaded", sim_epoch=sim_epoch.isoformat())
+
     rng = random.Random(42)
     emitted = 0
     # Cloud cover drifts slowly to give the "low renewable" alert something
@@ -73,8 +79,10 @@ def run(dry_run: bool, count: int | None) -> None:
         while count is None or emitted < count:
             cloud_cover = min(1.0, max(0.0, cloud_cover + rng.uniform(-0.05, 0.05)))
             now = datetime.now(timezone.utc)
+            sim_date = current_sim_date(sim_epoch, now)
             for household in HOUSEHOLDS:
-                event = generate_meter_reading(household, now=now, cloud_cover=cloud_cover, rng=rng)
+                event = generate_meter_reading(household, now=now, cloud_cover=cloud_cover, rng=rng,
+                                               sim_date=sim_date)
                 if dry_run:
                     print(json.dumps(event))
                 else:
@@ -87,7 +95,8 @@ def run(dry_run: bool, count: int | None) -> None:
                 producer.flush()
             log_event(
                 logger, "info", "meter_batch_emitted",
-                stage="ingestion", households=len(HOUSEHOLDS), cloud_cover=round(cloud_cover, 2),
+                stage="ingestion", sim_date=sim_date, households=len(HOUSEHOLDS),
+                cloud_cover=round(cloud_cover, 2),
                 total_emitted=emitted,
             )
             time.sleep(METER_INTERVAL_SECONDS)

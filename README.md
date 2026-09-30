@@ -55,7 +55,7 @@ bill and a zone-level solar report.
 ```
 
 * **Speed layer** — Spark Structured Streaming consumes `meter-readings` from Kafka
-  continuously, computes 1-minute tumbling-window zone aggregates (load, solar mix) and
+  continuously, computes 1-minute sliding-window (30 s slide) zone aggregates (load, solar mix) and
   per-household running totals, and upserts them into Postgres for instant querying. It
   also archives every raw event to Parquet (`data/raw/meter_readings/`) — this is what
   makes the batch layer possible without re-reading Kafka.
@@ -149,8 +149,9 @@ docker compose logs -f spark-streaming
 ```
 
 Everything (simulated clock = **1 simulated day per 5 real minutes**) is defined in
-`sources/common.py::SIM_DAY_SECONDS`. Within ~5 minutes you will see the first
-`tariff_YYYYMMDD.csv` file drop, the Airflow DAG fire, and `household_bills` populate.
+`sources/common.py::SIM_DAY_SECONDS`. The first `tariff_20260901.csv` drops at start-up;
+at the first day boundary (~5 minutes) the Airflow DAG fires for `20260901` and
+`household_bills` populates about a minute later.
 
 To stop and wipe all state:
 
@@ -252,17 +253,27 @@ look at the data shape without starting Docker.
   alert and flips `/health` to `degraded` — this satisfies the rubric's "no data received
   in N minutes" example directly.
 * **Metrics** — `GET /metrics` exposes Prometheus counters/gauges
-  (`meter_events_processed_total`, `active_alerts`, `api_requests_total`,
+  (`api_requests_total`, `active_alerts`, `meter_data_age_seconds`, `pipeline_health`,
   `batch_job_last_success_timestamp`).
+* Alerts are de-duplicated: the low-renewable rule fires once per (zone, window), and the
+  no-data rule fires once when the stream goes stale (and logs `data_flow_recovered` when
+  it comes back), so `active_alerts` reflects distinct incidents.
 
 ## 8. Simulated clock
 
 * 1 simulated **day** = **5 minutes** of wall-clock time (`SIM_DAY_SECONDS = 300` in
   `sources/common.py`).
+* Simulated day 0 is labelled `20260901`. Its start instant (the clock *epoch*) is written
+  to `/data/sim_clock.json` on the shared volume by whichever simulator starts first; both
+  simulators read it, so every meter reading carries a `sim_date` that matches the tariff
+  file for the same simulated day. The speed layer partitions the raw Parquet archive by
+  that `sim_date`. `docker compose down -v` resets the clock.
 * The streaming simulator emits one reading per household roughly every **2 seconds**.
-* The batch simulator drops one `tariff_YYYYMMDD.csv` (+ `weather_YYYYMMDD.csv`) file at
-  the start of every simulated day and calls the Airflow REST API to unpause/trigger the
-  DAG for that logical date.
+* At the start of every simulated day D the batch simulator drops `tariff_D.csv`
+  (+ `weather_D.csv`), then (after a 20 s grace period so the speed layer's last
+  micro-batch is archived) calls the Airflow REST API to trigger the DAG for **D-1**, the
+  day that has just finished. The first bills therefore appear roughly 6–7 minutes after
+  start-up.
 * All of this is configurable via `.env` — see `.env.example`.
 
 ## 9. Limitations & what changes at production scale

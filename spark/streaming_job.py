@@ -3,7 +3,7 @@
 SPEED LAYER — Spark Structured Streaming job.
 
 Reads raw JSON events from the Kafka topic `meter-readings`, and for every
-1-minute tumbling window per grid_zone:
+1-minute sliding window (30s slide) per grid_zone:
   * sums power consumption and solar generation
   * computes the zone's renewable (solar) share of load
   * flags a low-renewable alert when that share drops below threshold
@@ -51,6 +51,7 @@ METER_SCHEMA = StructType([
     StructField("solar_generation_kwh", DoubleType()),
     StructField("grid_zone", StringType()),
     StructField("timestamp", StringType()),
+    StructField("sim_date", StringType()),  # simulated day label (YYYYMMDD) from the shared sim clock
 ])
 
 
@@ -132,18 +133,28 @@ def write_zone_window_batch(batch_df: DataFrame, batch_id: int) -> None:
                 )
 
                 if renewable_share < LOW_RENEWABLE_THRESHOLD:
+                    # "update" output mode re-emits a window on every trigger
+                    # until the watermark closes it, so only alert once per
+                    # (zone, window) rather than once per micro-batch.
                     cur.execute(
                         """
-                        INSERT INTO alerts (alert_type, severity, grid_zone, household_id, message, created_at)
-                        VALUES ('LOW_RENEWABLE_CONTRIBUTION', 'WARNING', %s, NULL, %s, now())
+                        INSERT INTO alerts (alert_type, severity, grid_zone, household_id, window_start, message, created_at)
+                        SELECT 'LOW_RENEWABLE_CONTRIBUTION', 'WARNING', %s, NULL, %s, %s, now()
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM alerts
+                            WHERE alert_type = 'LOW_RENEWABLE_CONTRIBUTION'
+                              AND grid_zone = %s AND window_start = %s
+                        )
                         """,
-                        (r["grid_zone"],
+                        (r["grid_zone"], r["window_start"],
                          f"Renewable share {renewable_share:.1%} in {r['grid_zone']} "
                          f"is below the {LOW_RENEWABLE_THRESHOLD:.0%} threshold "
-                         f"for window {r['window_start']}"),
+                         f"for window {r['window_start']}",
+                         r["grid_zone"], r["window_start"]),
                     )
-                    log("processing", "low_renewable_alert", grid_zone=r["grid_zone"],
-                        renewable_share=round(renewable_share, 4), window_start=str(r["window_start"]))
+                    if cur.rowcount:
+                        log("processing", "low_renewable_alert", grid_zone=r["grid_zone"],
+                            renewable_share=round(renewable_share, 4), window_start=str(r["window_start"]))
         conn.commit()
     finally:
         conn.close()
@@ -197,10 +208,13 @@ def main() -> None:
     events = read_meter_stream(spark).withWatermark("event_time", "2 minutes")
 
     # --- 1. Raw archive to Parquet (feeds the batch layer) ---------------
+    # Partitioned by the *simulated* day the producer stamped on each event
+    # (not the wall-clock date), so the batch layer's sim_date matches the
+    # tariff_<sim_date>.csv file it joins against.
     raw_query = (
         events.select("meter_id", "household_id", "power_consumption_kwh", "solar_generation_kwh",
-                       "grid_zone", "event_time")
-        .withColumn("sim_date", F.date_format("event_time", "yyyyMMdd"))
+                       "grid_zone", "event_time", "sim_date")
+        .withColumn("sim_date", F.coalesce(F.col("sim_date"), F.date_format("event_time", "yyyyMMdd")))
         .writeStream.format("parquet")
         .option("path", RAW_ARCHIVE_DIR)
         .option("checkpointLocation", f"{CHECKPOINT_DIR}/raw_archive")

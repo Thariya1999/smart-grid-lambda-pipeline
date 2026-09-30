@@ -119,3 +119,19 @@ class TestSimulatedClock:
         d1 = sim_date_str(1, start_date="2026-09-01")
         assert d0 == "20260901"
         assert d1 == "20260902"
+
+    def test_shared_epoch_is_written_once_and_reused(self, tmp_path):
+        from sources.common import get_sim_epoch
+        clock_file = str(tmp_path / "sim_clock.json")
+        first = get_sim_epoch(clock_file)
+        second = get_sim_epoch(clock_file)  # e.g. the other simulator starting later
+        assert first == second
+
+    def test_meter_reading_carries_sim_date_matching_tariff_label(self):
+        from datetime import timedelta
+        from sources.common import current_sim_date
+        epoch = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = epoch + timedelta(seconds=310)  # inside simulated day 1
+        event = generate_meter_reading(HOUSEHOLDS[0], now=now, rng=random.Random(1),
+                                       sim_date=current_sim_date(epoch, now))
+        assert event["sim_date"] == sim_date_str(1)

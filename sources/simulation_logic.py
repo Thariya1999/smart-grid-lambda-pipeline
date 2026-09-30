@@ -41,8 +41,13 @@ def generate_meter_reading(
     now: datetime | None = None,
     cloud_cover: float = 0.0,
     rng: random.Random | None = None,
+    sim_date: str | None = None,
 ) -> dict:
-    """Generate one simulated smart-meter reading event for a household."""
+    """Generate one simulated smart-meter reading event for a household.
+
+    `sim_date` (YYYYMMDD) labels which simulated day the reading belongs to;
+    the speed layer partitions the raw archive by it so the batch layer can
+    join a day's readings with that same day's tariff file."""
     now = now or datetime.now(timezone.utc)
     rng = rng or random
 
@@ -65,6 +70,7 @@ def generate_meter_reading(
         "solar_generation_kwh": solar_generation_kwh,
         "grid_zone": household.grid_zone,
         "timestamp": now.isoformat(),
+        "sim_date": sim_date or now.strftime("%Y%m%d"),
     }
 
 

@@ -4,6 +4,11 @@ x-airflow-env: &airflow-env
   AIRFLOW__CORE__EXECUTOR: LocalExecutor
   AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://smartgrid:smartgrid@postgres:5432/airflow
   AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  # The DAG must be active as soon as it is parsed: the tariff simulator
+  # triggers it via the REST API, and runs of a paused DAG stay queued
+  # forever. (`airflow dags unpause` in airflow-init runs before the DAG has
+  # been parsed into the metadata DB, so it can't be relied on alone.)
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
   AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
   AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
   # Shared across every Airflow container (webserver, scheduler, init).
@@ -107,6 +112,10 @@ services:
       SPARK_MASTER_URL: spark://spark-master:7077
       SPARK_WORKER_MEMORY: 2G
       SPARK_WORKER_CORES: 2
+    # Executors of the Airflow-submitted batch job run here and read the raw
+    # Parquet archive + tariff/weather CSVs directly from the shared volume.
+    volumes:
+      - sgdata:/data
 
   spark-streaming:
     build:
@@ -131,6 +140,7 @@ services:
       PG_PASSWORD: smartgrid
     volumes:
       - sgdata:/data
+      - ./spark:/opt/spark_jobs
     command: >
       spark-submit
       --master local[2]
@@ -227,6 +237,10 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       METER_TOPIC: meter-readings
       SIM_DAY_SECONDS: ${SIM_DAY_SECONDS:-300}
+    # Shared volume holds sim_clock.json, the simulated-clock epoch both
+    # simulators read so their sim_date labels agree.
+    volumes:
+      - sgdata:/data
     command: ["sources/meter_simulator.py"]
 
   tariff-simulator:

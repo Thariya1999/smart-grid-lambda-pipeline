@@ -6,7 +6,7 @@
 -- SPEED LAYER tables -- written continuously by spark/streaming_job.py
 -- ===========================================================================
 
--- Windowed (1-minute tumbling, 30s slide) per-zone aggregates: the "grid
+-- Windowed (1-minute sliding, 30s slide) per-zone aggregates: the "grid
 -- load and renewable contribution by zone, right now" view.
 CREATE TABLE IF NOT EXISTS realtime_zone_stats (
     grid_zone               TEXT NOT NULL,
@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     severity        TEXT NOT NULL,
     grid_zone       TEXT,
     household_id    TEXT,
+    window_start    TIMESTAMPTZ,             -- streaming window that raised it (dedup key)
     message         TEXT NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     acknowledged    BOOLEAN NOT NULL DEFAULT FALSE

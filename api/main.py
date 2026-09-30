@@ -103,20 +103,29 @@ async def freshness_monitor_loop() -> None:
         if stale and db_connected:
             log_event("critical", "no_data_received_alert",
                       threshold_s=STALE_DATA_THRESHOLD_S, age_s=age_s)
-            try:
-                from api.db import get_conn
-                with get_conn() as conn, conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO alerts (alert_type, severity, message, created_at)
-                        VALUES ('NO_DATA_RECEIVED', 'CRITICAL', %s, now())
-                        """,
-                        (f"No meter readings stored in the last {STALE_DATA_THRESHOLD_S}s "
-                         f"(age={age_s:.0f}s if known else 'unknown').",),
-                    )
-                    conn.commit()
-            except Exception as exc:  # noqa: BLE001
-                log_event("error", "alert_insert_failed", error=str(exc))
+            # Edge-triggered: store one alert row when the stream *becomes*
+            # stale, rather than a duplicate row every 30s while it stays stale.
+            if not _health_state.get("stale_alert_raised"):
+                age_txt = f"{age_s:.0f}s" if age_s is not None else "unknown (no readings yet)"
+                try:
+                    from api.db import get_conn
+                    with get_conn() as conn, conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO alerts (alert_type, severity, message, created_at)
+                            VALUES ('NO_DATA_RECEIVED', 'CRITICAL', %s, now())
+                            """,
+                            (f"No meter readings stored in the last {STALE_DATA_THRESHOLD_S}s "
+                             f"(last reading age: {age_txt}).",),
+                        )
+                        conn.commit()
+                    _health_state["stale_alert_raised"] = True
+                except Exception as exc:  # noqa: BLE001
+                    log_event("error", "alert_insert_failed", error=str(exc))
+        elif not stale:
+            if _health_state.get("stale_alert_raised"):
+                log_event("info", "data_flow_recovered", age_s=age_s)
+            _health_state["stale_alert_raised"] = False
 
         try:
             last_batch = query_one(
@@ -253,8 +262,9 @@ def all_bills(sim_date: str | None = None):
         rows = query("SELECT * FROM household_bills WHERE sim_date = %s ORDER BY household_id", (sim_date,))
     else:
         latest_date = query_one("SELECT MAX(sim_date) AS d FROM household_bills")
-        d = latest_date["d"] if latest_date else None
-        rows = query("SELECT * FROM household_bills WHERE sim_date = %s ORDER BY household_id", (d,)) if d else []
+        sim_date = latest_date["d"] if latest_date else None
+        rows = query("SELECT * FROM household_bills WHERE sim_date = %s ORDER BY household_id",
+                     (sim_date,)) if sim_date else []
     return {"sim_date": sim_date, "bills": rows}
 
 
@@ -282,6 +292,8 @@ def alerts(limit: int = 50, unacknowledged_only: bool = False):
     rows = query(sql, (limit,))
     for r in rows:
         r["created_at"] = r["created_at"].isoformat()
+        if r.get("window_start"):
+            r["window_start"] = r["window_start"].isoformat()
     return {"alerts": rows}
 
 
